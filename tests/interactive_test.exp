@@ -13,8 +13,8 @@ set project_root [file dirname $script_dir]
 # Path to loglyze binary
 set loglyze_bin "$project_root/bin/loglyze"
 
-# Sample log file
-set sample_log "$project_root/samples/sample.log"
+# Use the simple log format as our test sample
+set sample_log "$project_root/samples/simple.log"
 
 # Procedure to handle common test setup
 proc test_setup {test_name} {

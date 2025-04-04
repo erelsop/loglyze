@@ -1,0 +1,12 @@
+LogLyze Export Metadata
+========================
+
+Export date: 2025-04-03 20:44:30
+Source file: /home/ere/src/loglyze/samples/simple.log
+Export type: filtered
+Total entries: 10
+Filtered entries: 10
+
+Applied Filters:
+---------------
+- No filters applied

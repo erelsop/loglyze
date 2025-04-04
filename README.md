@@ -435,6 +435,13 @@ The following predefined formats are included:
 - Nginx Access Log
 - Common JSON Logs
 - Simple Log Format (timestamp severity message)
+- Syslog (RFC 5424)
+- W3C Extended Log Format (IIS)
+- PostgreSQL logs
+- MySQL error logs
+- AWS CloudTrail logs
+- Kubernetes logs
+- Java stack traces
 
 ### Configuration
 

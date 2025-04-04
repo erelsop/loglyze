@@ -17,8 +17,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
 # Path to log files for testing
-SAMPLE_LOG="$PROJECT_ROOT/samples/sample.log"
-SAMPLE_LOG_2="$PROJECT_ROOT/samples/sample_2.log"
+SAMPLE_LOG="$PROJECT_ROOT/samples/simple.log"
+SAMPLE_LOG_2="$PROJECT_ROOT/samples/spring_boot.log"
 
 # Path to the main loglyze script
 LOGLYZE_BIN="$PROJECT_ROOT/bin/loglyze"
@@ -163,6 +163,7 @@ if [[ ! -f "$LOGLYZE_BIN" ]]; then
 fi
 
 echo "Using sample log: $SAMPLE_LOG"
+echo "Using sample log 2: $SAMPLE_LOG_2"
 echo "Using binary: $LOGLYZE_BIN"
 echo
 
@@ -195,7 +196,7 @@ run_test_with_assertion "Time-based filtering (to)" \
 
 # Test 6: Time-based filtering (range)
 run_test_with_assertion "Time-based filtering (range)" \
-    "$LOGLYZE_BIN --show-logs -f '2023-10-15 10:00:00' -t '2023-10-15 12:00:00' $SAMPLE_LOG" \
+    "$LOGLYZE_BIN --show-logs -f '2023-10-15 08:00:00' -t '2023-10-15 08:30:00' $SAMPLE_LOG" \
     "grep -q '2023-10-15' '$TEST_OUTPUT_FILE'"
 
 # Test 7: CSV export (use a manual approach since -o flag might not be implemented)
@@ -205,9 +206,9 @@ run_test_with_assertion "CSV export" \
     "$LOGLYZE_BIN -c $SAMPLE_LOG > '$CSV_OUTPUT'" \
     "[ -s '$CSV_OUTPUT' ] && cat '$CSV_OUTPUT' | grep -q 'timestamp\\|severity\\|message'"
 
-# Test 8: Multiple logs
+# Test 8: Multiple logs with different formats
 run_test "Multiple logs analysis" \
-    "$LOGLYZE_BIN $SAMPLE_LOG $SAMPLE_LOG_2"
+    "$LOGLYZE_BIN $SAMPLE_LOG $PROJECT_ROOT/samples/json.log"
 
 # Test 9: Error-only filtering on multiple logs
 run_test_with_assertion "Error-only filtering on multiple logs" \
@@ -235,6 +236,16 @@ echo -e "${YELLOW}Skipping interactive mode test (tested separately with expect 
 run_test_with_assertion "Show logs option" \
     "$LOGLYZE_BIN --show-logs $SAMPLE_LOG" \
     "grep -q '2023-10-15' '$TEST_OUTPUT_FILE'"
+
+# Test 14: Test a complex format - AWS CloudTrail
+run_test_with_assertion "AWS CloudTrail format" \
+    "$LOGLYZE_BIN --show-logs $PROJECT_ROOT/samples/aws_cloudtrail.log" \
+    "grep -q 'eventName\\|userIdentity\\|eventSource' '$TEST_OUTPUT_FILE'"
+
+# Test 15: Test another complex format - Java Stacktrace
+run_test_with_assertion "Java Stacktrace format" \
+    "$LOGLYZE_BIN --show-logs $PROJECT_ROOT/samples/java_stacktrace.log" \
+    "grep -q 'Exception\\|NullPointerException\\|SQLException' '$TEST_OUTPUT_FILE'"
 
 echo
 echo "======================================================"
