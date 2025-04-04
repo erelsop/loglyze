@@ -1,0 +1,215 @@
+#!/usr/bin/expect -f
+#
+# Interactive mode testing with expect
+# Tests stacking filters and other interactive features
+
+# Set timeout
+set timeout 10
+
+# Get the project root
+set script_dir [file dirname [file normalize [info script]]]
+set project_root [file dirname $script_dir]
+
+# Path to loglyze binary
+set loglyze_bin "$project_root/bin/loglyze"
+
+# Sample log file
+set sample_log "$project_root/samples/sample.log"
+
+# Procedure to handle common test setup
+proc test_setup {test_name} {
+    puts "\n\033\[1;33m====== Testing: $test_name ======\033\[0m\n"
+}
+
+# Procedure to handle successful test completion
+proc test_success {test_name} {
+    puts "\n\033\[1;32m✓ PASS: $test_name\033\[0m\n"
+}
+
+# Start test
+puts "\n\033\[1;36m=== LogLyze Interactive Mode Tests ===\033\[0m\n"
+
+# Test 1: Basic interactive mode startup
+test_setup "Basic interactive mode startup"
+
+# Start loglyze in interactive mode
+spawn $loglyze_bin -i $sample_log
+
+# Expect the welcome screen
+expect {
+    "Welcome to LogLyze Interactive Mode" {
+        puts "Found welcome screen"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for welcome screen\033\[0m"
+        exit 1
+    }
+}
+
+# Press any key to continue
+send "\r"
+
+# Expect the log display
+expect {
+    "=== LogLyze Interactive Mode ===" {
+        puts "Interactive mode started successfully"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for interactive mode display\033\[0m"
+        exit 1
+    }
+}
+
+# Test 2: Filter by errors only (first filter)
+test_setup "Filter by errors only"
+
+# Press 'e' to filter by errors
+send "e"
+
+# Expect confirmation that errors only filter was applied
+expect {
+    "Filtered to " {
+        puts "Errors only filter applied successfully"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for errors filter confirmation\033\[0m"
+        exit 1
+    }
+}
+
+# Verify that "Active filters" is shown
+expect {
+    "Active filters:" {
+        puts "Active filters indicator shown"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for active filters indicator\033\[0m"
+        exit 1
+    }
+}
+
+# Test 3: Stack a text filter (second filter)
+test_setup "Stack a text filter on top of errors only"
+
+# Press 'f' to add text filter
+send "f"
+
+# Expect the text filter prompt
+expect {
+    "Enter text to filter by" {
+        puts "Text filter prompt shown"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for text filter prompt\033\[0m"
+        exit 1
+    }
+}
+
+# Filter for log entries containing "failed"
+send "failed\r"
+
+# Expect confirmation that text filter was applied
+expect {
+    "Found " {
+        puts "Text filter applied successfully"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for text filter confirmation\033\[0m"
+        exit 1
+    }
+}
+
+# Test 4: Verify multiple filters are shown
+test_setup "Verify multiple filters are displayed"
+
+# Expect to see the stacked filters
+expect {
+    "Errors only" {
+        puts "Errors only filter still active"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for errors filter indicator\033\[0m"
+        exit 1
+    }
+}
+
+expect {
+    "Text:" {
+        puts "Text filter shown in active filters"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for text filter indicator\033\[0m"
+        exit 1
+    }
+}
+
+# Test 5: Clear all filters
+test_setup "Clear all filters"
+
+# Press 'c' to clear filters
+send "c"
+
+# Expect confirmation that filters were cleared
+expect {
+    "All filters cleared" {
+        puts "All filters cleared successfully"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for clear filters confirmation\033\[0m"
+        exit 1
+    }
+}
+
+# Test 6: Export to CSV
+test_setup "Export to CSV"
+
+# Press 'x' to export
+send "x"
+
+# Expect the export prompt
+expect {
+    "Enter output filename" {
+        puts "Export filename prompt shown"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for export prompt\033\[0m"
+        exit 1
+    }
+}
+
+# Accept default filename
+send "\r"
+
+# Expect confirmation that export was successful
+expect {
+    "Successfully exported" {
+        puts "CSV export completed successfully"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for export confirmation\033\[0m"
+        exit 1
+    }
+}
+
+# Test 7: Quit
+test_setup "Quit interactive mode"
+
+# Press 'q' to quit
+send "q"
+
+# Expect to exit
+expect {
+    "Thank you for using LogLyze" {
+        puts "Exited interactive mode successfully"
+    }
+    timeout {
+        puts "\033\[1;31m✗ FAIL: Timeout waiting for exit message\033\[0m"
+        exit 1
+    }
+}
+
+expect eof
+
+# Test complete
+puts "\n\033\[1;32m=== All interactive mode tests completed successfully! ===\033\[0m\n"
+exit 0 

@@ -1,0 +1,783 @@
+#!/usr/bin/env bash
+#
+# loglyze - A powerful log analysis tool
+# 
+# Main executable that parses command line arguments and orchestrates the workflow
+
+# Display usage information
+# shellcheck disable=SC2317
+usage() {
+    echo "Usage: $0 [options] [log_file]"
+    echo "Analyze log files and extract useful information."
+    echo
+    echo "Options:"
+    echo "  -h, --help               Show this help message"
+    echo "  -v, --verbose            Enable verbose output for debugging"
+    echo "  --show-logs              Display log content (by default only summary is shown)"
+    echo "  -i, --interactive        Display logs in a basic paged view (full interactive mode coming soon)"
+    echo "  -c, --csv                Export results as CSV (after summary)"
+    echo "  --csv-only               Export results as CSV only (no summary, ideal for redirection)"
+    echo "  -f, --from TIME          Filter entries from this time (format: YYYY-MM-DD HH:MM:SS)"
+    echo "  -t, --to TIME            Filter entries to this time (format: YYYY-MM-DD HH:MM:SS)"
+    echo "  -e, --errors-only [N]    Show only error entries (optionally show top N errors, default: 5)"
+    echo "  -l, --limit NUMBER       Limit output to NUMBER entries (defaults to 20 when showing logs)"
+    echo "  -s, --sample             Sample log entries instead of showing all"
+    echo "  --top-errors NUMBER      Show top NUMBER frequent errors in summary (deprecated, use -e N)"
+    echo
+    echo "If no log file is provided, stdin will be used."
+    echo
+    echo "Examples:"
+    echo "  $0 access.log                           # Show only summary"
+    echo "  $0 --show-logs access.log               # Show summary and logs"
+    echo "  $0 -e 10 access.log                     # Show summary with top 10 errors"
+    echo "  $0 -f \"2023-10-01 00:00:00\" access.log # Filter by date and show all entries"
+    echo "  $0 --csv-only access.log > results.csv  # Export as CSV for further processing"
+    exit 0
+}
+
+# Define script directory and paths - with better handling for symlinks
+SCRIPT_DIR=""
+SCRIPT_DIR="$( cd "$( dirname "$(readlink -f "${BASH_SOURCE[0]}")" )" && pwd )"
+
+LIB_DIR=""
+LIB_DIR="$( cd "$SCRIPT_DIR/../lib" 2>/dev/null && pwd )"
+
+# Declare and export CONFIG_DIR first, then assign
+CONFIG_DIR=""
+export CONFIG_DIR
+CONFIG_DIR="$( cd "$SCRIPT_DIR/../config" 2>/dev/null && pwd )"
+
+# Fall back to local lib directory if not found (for system-wide installations)
+if [[ ! -d "$LIB_DIR" || ! -f "$LIB_DIR/colors.sh" ]]; then
+    # Try to find the library by looking at the real path of the script
+    REAL_SCRIPT_PATH=$(readlink -f "$0")
+    REAL_SCRIPT_DIR="$( cd "$( dirname "${REAL_SCRIPT_PATH}" )" && pwd )"
+    REAL_LIB_DIR="$( cd "${REAL_SCRIPT_DIR}/../lib" 2>/dev/null && pwd )"
+    
+    if [[ -d "${REAL_LIB_DIR}" && -f "${REAL_LIB_DIR}/colors.sh" ]]; then
+        LIB_DIR="${REAL_LIB_DIR}"
+    else
+        # Additional locations to look for the library
+        for lib_path in \
+            "$(pwd)/lib" \
+            "${HOME}/src/loglyze/lib" \
+            "/usr/local/lib/loglyze" \
+            "/usr/lib/loglyze"; do
+            if [[ -d "${lib_path}" && -f "${lib_path}/colors.sh" ]]; then
+                LIB_DIR="${lib_path}"
+                break
+            fi
+        done
+    fi
+fi
+
+# Source required libraries
+if [[ -f "$LIB_DIR/colors.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "$LIB_DIR/colors.sh"
+else
+    # Define colors (in case lib/colors.sh is missing)
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    NC='\033[0m' # No Color
+    echo "Warning: colors.sh library not found, using default colors."
+fi
+
+# Default verbosity level
+VERBOSITY=1
+
+# Log functions
+log_debug() {
+    [[ $VERBOSITY -ge 2 ]] && echo -e "${CYAN}[DEBUG]${NC} $*" >&2
+}
+
+log_info() {
+    [[ $VERBOSITY -ge 1 ]] && echo -e "${GREEN}[INFO]${NC} $*" >&2
+}
+
+log_warning() {
+    [[ $VERBOSITY -ge 1 ]] && echo -e "${YELLOW}[WARNING]${NC} $*" >&2
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $*" >&2
+}
+
+# Default values
+INTERACTIVE=false
+EXPORT_CSV=false
+SUPPRESS_SUMMARY=false
+FROM_TIME=""
+TO_TIME=""
+ERRORS_ONLY=false
+LIMIT=""
+SAMPLE=false
+SHOW_LOGS=false
+TOP_ERRORS=5
+LOG_FILE=""
+
+# Fix SC2317 - Move the handle_error function definition before it's used
+handle_error() {
+    local exit_code=$1
+    local error_message=$2
+    log_error "${error_message}"
+    exit "${exit_code}"
+}
+
+# Parse command line arguments
+parse_args() {
+    local positional=()
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                usage
+                ;;
+            -v|--verbose)
+                VERBOSITY=2
+                shift
+                ;;
+            --show-logs)
+                SHOW_LOGS=true
+                shift
+                ;;
+            -i|--interactive)
+                INTERACTIVE=true
+                # TODO: Implement full interactive mode with navigation, filtering, and search
+                # Currently this just displays logs in a paged view
+                shift
+                ;;
+            -c|--csv)
+                EXPORT_CSV=true
+                shift
+                ;;
+            --csv-only)
+                EXPORT_CSV=true
+                SUPPRESS_SUMMARY=true
+                shift
+                ;;
+            -f|--from)
+                FROM_TIME="$2"
+                shift 2
+                ;;
+            -t|--to)
+                TO_TIME="$2"
+                shift 2
+                ;;
+            -e|--errors-only)
+                ERRORS_ONLY=true
+                # Check if next arg is a number - if so, use it for TOP_ERRORS
+                if [[ $# -gt 1 && "$2" =~ ^[0-9]+$ ]]; then
+                    TOP_ERRORS="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            -l|--limit)
+                LIMIT="$2"
+                shift 2
+                ;;
+            -s|--sample)
+                SAMPLE=true
+                shift
+                ;;
+            --top-errors)
+                # For backwards compatibility
+                if [[ $# -gt 1 && "$2" =~ ^[0-9]+$ ]]; then
+                    TOP_ERRORS="$2"
+                    shift 2
+                else
+                    log_error "The --top-errors flag requires a numeric value. Example: --top-errors 10"
+                    exit 1
+                fi
+                ;;
+            *)
+                positional+=("$1")
+                shift
+                ;;
+        esac
+    done
+    
+    # Set positional arguments back
+    set -- "${positional[@]}"
+    
+    # Set log file
+    if [[ $# -gt 0 ]]; then
+        LOG_FILE="$1"
+    elif [[ -t 0 ]]; then
+        # Terminal input (stdin is a terminal) without a log file path - this is the case we need to handle
+        log_error "No log file specified. Please provide a log file or use --help for usage information."
+        usage
+        exit 1
+    else
+        # Data is being piped in or redirected from a file
+        LOG_FILE=$(mktemp)
+        cat > "$LOG_FILE"
+        READ_FROM_STDIN=true
+    fi
+    
+    # Validate that the log file exists if specified
+    if [[ -n "$LOG_FILE" && ! -f "$LOG_FILE" && -z "$READ_FROM_STDIN" ]]; then
+        log_error "File not found: $LOG_FILE"
+        exit 1
+    fi
+}
+
+# Generate a summary of the log file
+generate_summary() {
+    local log_file=$1
+    local output_to=${2:-"stdout"}
+    local top_n=${3:-5}
+    
+    log_info "Generating summary for $log_file"
+    
+    # Check if file exists
+    if [[ ! -f "$log_file" ]]; then
+        log_error "File not found: $log_file"
+        exit 1
+    fi
+    
+    # Count lines
+    local total_lines
+    total_lines=$(wc -l < "$log_file")
+    
+    # Count errors, warnings, info
+    local error_count
+    error_count=$(grep -c -i "error" "$log_file")
+    
+    local warning_count
+    warning_count=$(grep -c -i "warn" "$log_file")
+    
+    local info_count
+    info_count=$(grep -c -i "info" "$log_file")
+    
+    # Extract time range
+    local first_timestamp=""
+    local last_timestamp=""
+    
+    # Search for multiple timestamp formats
+    for pattern in \
+        "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}" \
+        "[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}" \
+        "[A-Za-z]{3} [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2}"; do
+        
+        if [[ -z "$first_timestamp" ]]; then
+            first_timestamp=$(grep -oE "$pattern" "$log_file" | head -1)
+            # Convert T to space if it exists
+            first_timestamp="${first_timestamp//T/ }"
+        fi
+        
+        if [[ -z "$last_timestamp" ]]; then
+            last_timestamp=$(grep -oE "$pattern" "$log_file" | tail -1)
+            # Convert T to space if it exists
+            last_timestamp="${last_timestamp//T/ }"
+        fi
+        
+        # If we found both timestamps, break
+        if [[ -n "$first_timestamp" && -n "$last_timestamp" ]]; then
+            break
+        fi
+    done
+    
+    # Get top errors
+    local top_errors
+    top_errors=$(grep -i "error" "$log_file" | sort | uniq -c | sort -nr | head -"$top_n" | 
+                 awk '{$1=$1; print "  " $1 " occurrences: " substr($0, index($0,$2))}')
+    
+    if [[ "$output_to" == "stderr" ]]; then
+        # Output to stderr for CSV mode
+        {
+            echo "=== Log Summary ===" 
+            echo "File: $log_file"
+            echo "Total Lines: $total_lines"
+            echo "Error Count: $error_count"
+            echo "Warning Count: $warning_count"
+            echo "Info Count: $info_count"
+            echo "Time Range: $first_timestamp to $last_timestamp"
+            echo ""
+            echo "=== Top $top_n Frequent Errors ==="
+            if [[ -z "$top_errors" ]]; then
+                echo "  No errors found"
+            else
+                echo "$top_errors"
+            fi
+            echo ""
+        } >&2
+    else
+        # Normal output to stdout
+        echo "=== Log Summary ==="
+        echo "File: $log_file"
+        echo "Total Lines: $total_lines"
+        echo "Error Count: $error_count"
+        echo "Warning Count: $warning_count"
+        echo "Info Count: $info_count"
+        echo "Time Range: $first_timestamp to $last_timestamp"
+        echo ""
+        echo "=== Top $top_n Frequent Errors ==="
+        if [[ -z "$top_errors" ]]; then
+            echo "  No errors found"
+        else
+            echo "$top_errors"
+        fi
+        echo ""
+    fi
+}
+
+# Check if a file is considered large
+handle_large_file() {
+    local log_file=$1
+    local output_to=${2:-"stdout"}
+    local size_mb
+    
+    # Get file size in MB
+    size_mb=$(du -m "$log_file" | cut -f1)
+    log_debug "File size: ${size_mb}MB (threshold: 10MB)"
+    
+    # Check if file is large
+    if [[ $size_mb -ge 10 ]]; then
+        if [[ "$output_to" == "stderr" ]]; then
+            echo "WARNING: This log file is large (${size_mb}MB). Processing may take some time." >&2
+        else
+            echo "WARNING: This log file is large (${size_mb}MB). Processing may take some time."
+        fi
+        
+        # If in interactive mode, ask for confirmation
+        if [[ "$INTERACTIVE" == "true" ]]; then
+            read -p "Do you want to continue? [y/N] " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                echo "Aborted by user."
+                exit 0
+            fi
+        fi
+        
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Main function
+main() {
+    # Log arguments
+    log_debug "Log file: $LOG_FILE"
+    log_debug "Interactive mode: $INTERACTIVE"
+    log_debug "Export CSV: $EXPORT_CSV"
+    log_debug "Suppress Summary: $SUPPRESS_SUMMARY"
+    log_debug "From time: $FROM_TIME"
+    log_debug "To time: $TO_TIME"
+    log_debug "Errors only: $ERRORS_ONLY"
+    log_debug "Limit: $LIMIT"
+    log_debug "Sample: $SAMPLE"
+    log_debug "Show logs: $SHOW_LOGS"
+    log_debug "Top errors: $TOP_ERRORS"
+    
+    # Validate incompatible options
+    if [[ "$INTERACTIVE" == "true" && "$EXPORT_CSV" == "true" ]]; then
+        log_error "Cannot use interactive mode (-i) with CSV export (-c)"
+        exit 1
+    fi
+    
+    # Check if file exists
+    if [[ ! -f "$LOG_FILE" ]]; then
+        log_error "File not found: $LOG_FILE"
+        exit 1
+    fi
+    
+    # Export generate_summary function for interactive mode
+    export -f generate_summary
+    export -f log_info
+    export -f log_error
+    export -f log_debug
+    export -f log_warning
+    
+    # If interactive mode is enabled, use it and exit
+    if [[ "$INTERACTIVE" == "true" ]]; then
+        # Get the absolute path to the interactive mode module
+        INTERACTIVE_MODULE="$LIB_DIR/interactive_mode.sh"
+        
+        log_debug "Interactive mode requested. Module path: $INTERACTIVE_MODULE"
+        
+        # Check if the module file exists
+        if [[ ! -f "$INTERACTIVE_MODULE" ]]; then
+            log_error "Interactive mode module not found at: $INTERACTIVE_MODULE"
+            exit 1
+        fi
+        
+        # Make sure the module is executable
+        if [[ ! -x "$INTERACTIVE_MODULE" ]]; then
+            log_warning "Interactive mode module is not executable. Attempting to fix..."
+            chmod +x "$INTERACTIVE_MODULE" || log_warning "Failed to make module executable."
+        fi
+        
+        # Source the module
+        log_debug "Sourcing interactive mode module..."
+        # shellcheck source=../lib/interactive_mode.sh
+        # shellcheck disable=SC1091
+        source "$INTERACTIVE_MODULE"
+        
+        # Check if run_interactive_mode function is available
+        if type run_interactive_mode >/dev/null 2>&1; then
+            # Export LOG_FILE for interactive mode
+            export LOG_FILE
+            export LOG_FILE_ORIGINAL="$LOG_FILE"
+            # Also export needed variables for filtering
+            export ERRORS_ONLY
+            export FROM_TIME
+            export TO_TIME
+            
+            log_info "Starting interactive mode for $LOG_FILE"
+            echo ""
+            
+            # Create a temporary file for filtered output if it hasn't been created yet
+            if [[ ! -v TEMP_FILE ]]; then
+                TEMP_FILE=$(mktemp)
+                trap 'rm -f $TEMP_FILE' EXIT
+                cat "$LOG_FILE" > "$TEMP_FILE"
+                
+                # Apply filters if needed
+                if [[ -n "$FROM_TIME" || -n "$TO_TIME" ]]; then
+                    if type apply_time_filters &>/dev/null; then
+                        apply_time_filters "$TEMP_FILE" "$FROM_TIME" "$TO_TIME" > "$TEMP_FILE.new"
+                        mv "$TEMP_FILE.new" "$TEMP_FILE"
+                    fi
+                fi
+                
+                if [[ "$ERRORS_ONLY" == "true" ]]; then
+                    grep -i "error" "$TEMP_FILE" > "$TEMP_FILE.new"
+                    mv "$TEMP_FILE.new" "$TEMP_FILE"
+                fi
+            fi
+            
+            # Check if any filters have been applied or will be applied
+            if [[ -n "$FROM_TIME" || -n "$TO_TIME" || "$ERRORS_ONLY" == "true" ]]; then
+                log_debug "Filters detected. Using filtered content from TEMP_FILE for interactive mode."
+                
+                # Use the temporary filtered file as input for interactive mode
+                run_interactive_mode "$TEMP_FILE"
+            else
+                # No filters - use the original log file
+                run_interactive_mode "$LOG_FILE"
+            fi
+            
+            # Clean up temp file if needed
+            if [[ -n "$READ_FROM_STDIN" ]]; then
+                rm -f "$LOG_FILE"
+            fi
+            exit 0
+        else
+            log_error "Interactive mode module was loaded but the run_interactive_mode function is not available."
+            log_error "Troubleshooting steps:"
+            log_error "1. Try running with absolute paths: $SCRIPT_DIR/loglyze -i $LOG_FILE"
+            log_error "2. Check for any error messages when loading the module"
+            log_error "3. Reset the terminal with: stty sane"
+            
+            # Fallback to non-interactive mode
+            log_warning "Falling back to non-interactive mode."
+            # Set show logs flag to at least show the content
+            SHOW_LOGS=true
+        fi
+    fi
+    
+    # Choose where to output the summary based on export mode
+    local summary_output="stdout"
+    if [[ "$EXPORT_CSV" == "true" ]]; then
+        summary_output="stderr"
+    fi
+    
+    # Generate summary unless suppressed
+    if [[ "$SUPPRESS_SUMMARY" != "true" ]]; then
+        generate_summary "$LOG_FILE" "$summary_output" "$TOP_ERRORS"
+        
+        # Check if file is large
+        handle_large_file "$LOG_FILE" "$summary_output"
+    fi
+    
+    # Determine if we need to process and display logs
+    PROCESS_LOGS=false
+    if [[ "$SHOW_LOGS" == "true" || "$INTERACTIVE" == "true" || "$EXPORT_CSV" == "true" ]]; then
+        PROCESS_LOGS=true
+    fi
+    
+    # If we're not processing logs, we're done
+    if [[ "$PROCESS_LOGS" != "true" ]]; then
+        log_debug "Not displaying logs (use --show-logs to see log content)"
+        # Clean up and exit
+        if [[ -n "$READ_FROM_STDIN" ]]; then
+            rm -f "$LOG_FILE"
+        fi
+        exit 0
+    fi
+    
+    # Set default limit if not specified but showing logs
+    if [[ -z "$LIMIT" && "$SAMPLE" != "true" && "$SUPPRESS_SUMMARY" != "true" ]]; then
+        LIMIT=20
+        if [[ "$summary_output" == "stdout" ]]; then
+            echo -e "${YELLOW}Showing first $LIMIT lines. Use -l option to specify limit.${NC}\n"
+        else
+            echo -e "${YELLOW}Showing first $LIMIT lines. Use -l option to specify limit.${NC}\n" >&2
+        fi
+    fi
+    
+    # Create a temporary file for filtered output
+    local TEMP_FILE
+    TEMP_FILE=$(mktemp)
+    trap 'rm -f $TEMP_FILE' EXIT
+    
+    # Start with the unfiltered file
+    cat "$LOG_FILE" > "$TEMP_FILE"
+    
+    # Apply time filter if specified
+    if [[ -n "$FROM_TIME" || -n "$TO_TIME" ]]; then
+        # Get original count for comparison
+        local original_count
+        original_count=$(wc -l < "$TEMP_FILE")
+        
+        log_debug "Applying time filters using time_utils"
+        # Use the apply_time_filters function from time_utils.sh
+        if type apply_time_filters &>/dev/null; then
+            apply_time_filters "$TEMP_FILE" "$FROM_TIME" "$TO_TIME" > "$TEMP_FILE.new"
+            mv "$TEMP_FILE.new" "$TEMP_FILE"
+        else
+            # Fallback to simpler filtering if function not available
+            if [[ -n "$FROM_TIME" ]]; then
+                log_debug "Filtering from time: $FROM_TIME"
+                # Make the pattern handle ISO 8601 with T separator and timezone
+                awk -v fromtime="${FROM_TIME//T/ }" '
+                    BEGIN { 
+                        match_found = 0;
+                    }
+                    
+                    function extract_ts(line) {
+                        if (match(line, /[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}/)) {
+                            ts = substr(line, RSTART, RLENGTH);
+                            gsub("T", " ", ts);
+                            return ts;
+                        } 
+                        if (match(line, /[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}/)) {
+                            return substr(line, RSTART, RLENGTH);
+                        }
+                        return "";
+                    }
+                    
+                    {
+                        ts = extract_ts($0);
+                        if (ts == "" || ts >= fromtime) {
+                            print;
+                        }
+                    }
+                ' "$TEMP_FILE" > "$TEMP_FILE.new"
+                mv "$TEMP_FILE.new" "$TEMP_FILE"
+            fi
+            
+            if [[ -n "$TO_TIME" ]]; then
+                log_debug "Filtering to time: $TO_TIME"
+                # Make the pattern handle ISO 8601 with T separator and timezone
+                awk -v totime="${TO_TIME//T/ }" '
+                    BEGIN { 
+                        match_found = 0;
+                    }
+                    
+                    function extract_ts(line) {
+                        if (match(line, /[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}/)) {
+                            ts = substr(line, RSTART, RLENGTH);
+                            gsub("T", " ", ts);
+                            return ts;
+                        } 
+                        if (match(line, /[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}/)) {
+                            return substr(line, RSTART, RLENGTH);
+                        }
+                        return "";
+                    }
+                    
+                    {
+                        ts = extract_ts($0);
+                        if (ts == "" || ts <= totime) {
+                            print;
+                        }
+                    }
+                ' "$TEMP_FILE" > "$TEMP_FILE.new"
+                mv "$TEMP_FILE.new" "$TEMP_FILE"
+            fi
+        fi
+        
+        # Get filtered count and show message
+        local filtered_count
+        filtered_count=$(wc -l < "$TEMP_FILE")
+        time_range=""
+        [[ -n "$FROM_TIME" ]] && time_range="from $FROM_TIME"
+        [[ -n "$TO_TIME" ]] && time_range="${time_range:+$time_range }to $TO_TIME"
+        
+        if [[ "$summary_output" == "stdout" ]]; then
+            echo -e "${YELLOW}Filtered by time $time_range ($filtered_count of $original_count entries).${NC}\n"
+        else
+            echo -e "${YELLOW}Filtered by time $time_range ($filtered_count of $original_count entries).${NC}\n" >&2
+        fi
+    fi
+    
+    # Apply error filter if needed
+    if [[ "$ERRORS_ONLY" == "true" ]]; then
+        log_debug "Filtering for errors only"
+        grep -i "error" "$TEMP_FILE" > "$TEMP_FILE.new"
+        mv "$TEMP_FILE.new" "$TEMP_FILE"
+        
+        local filtered_count
+        filtered_count=$(wc -l < "$TEMP_FILE")
+        if [[ "$summary_output" == "stdout" ]]; then
+            echo -e "${YELLOW}Filtered to show only errors ($filtered_count entries).${NC}\n"
+        else
+            echo -e "${YELLOW}Filtered to show only errors ($filtered_count entries).${NC}\n" >&2
+        fi
+    fi
+    
+    # Apply sampling if needed
+    if [[ "$SAMPLE" == "true" ]]; then
+        log_debug "Sampling log entries"
+        local total_lines
+        total_lines=$(wc -l < "$TEMP_FILE")
+        
+        # Calculate sample size
+        local sample_size=20
+        if [[ $total_lines -gt 1000 ]]; then
+            sample_size=50
+        elif [[ $total_lines -gt 100 ]]; then
+            sample_size=30
+        fi
+        
+        # Calculate step size
+        local step=$((total_lines / sample_size))
+        [[ $step -lt 1 ]] && step=1
+        
+        log_debug "Sampling with step size: $step"
+        awk -v step="$step" 'NR % step == 0' "$TEMP_FILE" > "$TEMP_FILE.new"
+        mv "$TEMP_FILE.new" "$TEMP_FILE"
+        
+        if [[ "$summary_output" == "stdout" ]]; then
+            echo -e "${YELLOW}Showing sample of approximately $sample_size lines from $total_lines total.${NC}\n"
+        else
+            echo -e "${YELLOW}Showing sample of approximately $sample_size lines from $total_lines total.${NC}\n" >&2
+        fi
+    elif [[ -n "$LIMIT" ]]; then
+        log_debug "Limiting output to $LIMIT lines"
+        head -n "$LIMIT" "$TEMP_FILE" > "$TEMP_FILE.new"
+        mv "$TEMP_FILE.new" "$TEMP_FILE"
+    fi
+    
+    # Display log content header only if not in CSV mode
+    if [[ "$EXPORT_CSV" != "true" ]]; then
+        log_info "Displaying log content"
+        echo -e "=== Log Content ===\n"
+    fi
+    
+    if [[ "$EXPORT_CSV" == "true" ]]; then
+        # CSV export mode - only output CSV data to stdout
+        echo "timestamp,severity,message"
+        
+        while IFS= read -r line; do
+            # Skip comment lines and empty lines
+            if [[ "$line" =~ ^[[:space:]]*# ]] || [[ -z "${line// }" ]]; then
+                continue
+            fi
+            
+            # Extract timestamp with improved pattern matching
+            local timestamp=""
+            # Try multiple timestamp formats, prioritize ISO 8601 with T separator and timezone
+            if [[ "$line" =~ ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?([+-][0-9]{2}:[0-9]{2}|Z)? ]]; then
+                timestamp="${BASH_REMATCH[1]}"
+                # Convert T to space for consistency
+                timestamp="${timestamp//T/ }"
+            # ISO 8601 with space separator
+            elif [[ "$line" =~ ([0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
+                timestamp="${BASH_REMATCH[1]}"
+            # Syslog format
+            elif [[ "$line" =~ ([A-Za-z]{3}\ +[0-9]{1,2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
+                # Add current year for syslog format
+                local current_year
+                current_year=$(date +"%Y")
+                timestamp="${BASH_REMATCH[1]} $current_year"
+            # MM/DD/YYYY format
+            elif [[ "$line" =~ ([0-9]{2}/[0-9]{2}/[0-9]{4}\ [0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
+                timestamp="${BASH_REMATCH[1]}"
+            fi
+            
+            # Determine severity with improved detection
+            local severity="UNKNOWN"
+            if [[ "$line" =~ ERROR|error|FAIL|fail|FATAL|fatal|EXCEPTION|exception|CRITICAL|critical ]]; then
+                severity="ERROR"
+            elif [[ "$line" =~ WARN|WARNING|warn|warning ]]; then
+                severity="WARNING"
+            elif [[ "$line" =~ INFO|info ]]; then
+                severity="INFO"
+            elif [[ "$line" =~ DEBUG|debug ]]; then
+                severity="DEBUG"
+            elif [[ "$line" =~ NOTICE|notice ]]; then
+                severity="NOTICE"
+            elif [[ "$line" =~ started|STARTED|completed|COMPLETED|FINISHED|finished|SUCCESS|success ]]; then
+                severity="INFO"
+            elif [[ "$line" =~ FAILED|failed|cannot|CANNOT|"not found"|"NOT FOUND" ]]; then
+                severity="ERROR"
+            fi
+            
+            # Extract message more intelligently
+            local message="$line"
+            
+            # If we found a timestamp, try to extract the message after it
+            if [[ -n "$timestamp" ]]; then
+                # Remove the timestamp
+                message="${message#*"$timestamp"}"
+                
+                # Try to find and remove the severity level
+                if [[ "$message" =~ ([[:space:]]*[A-Za-z]+:[[:space:]]+|[[:space:]]+[A-Za-z]+[[:space:]]+) ]]; then
+                    # Remove leading space and severity
+                    message="${message#*"${BASH_REMATCH[1]}"}"
+                fi
+                
+                # Remove leading whitespace
+                message="${message#"${message%%[![:space:]]*}"}"
+                
+                # Try to remove hostname parts if present
+                if [[ "$message" =~ ^[a-zA-Z0-9_-]+[[:space:]]+ ]]; then
+                    message="${message#"${BASH_REMATCH[0]}"}"
+                fi
+            fi
+            
+            # Output CSV with proper escaping
+            # Double any quotes in the fields
+            timestamp="${timestamp//\"/\"\"}"
+            severity="${severity//\"/\"\"}"
+            message="${message//\"/\"\"}"
+            
+            echo "\"$timestamp\",\"$severity\",\"$message\""
+        done < "$TEMP_FILE"
+    else
+        # Display with color highlighting
+        while IFS= read -r line; do
+            if [[ "$line" =~ ERROR|error ]]; then
+                echo -e "${RED}$line${NC}"
+            elif [[ "$line" =~ WARN|WARNING|warn|warning ]]; then
+                echo -e "${YELLOW}$line${NC}"
+            elif [[ "$line" =~ INFO|info ]]; then
+                echo -e "${GREEN}$line${NC}"
+            elif [[ "$line" =~ DEBUG|debug ]]; then
+                echo -e "${BLUE}$line${NC}"
+            else
+                echo "$line"
+            fi
+        done < "$TEMP_FILE"
+    fi
+    
+    # Clean up temp file if needed
+    if [[ -n "$READ_FROM_STDIN" ]]; then
+        rm -f "$LOG_FILE"
+    fi
+}
+
+# Parse the command line arguments
+parse_args "$@"
+
+# Main function
+main 
