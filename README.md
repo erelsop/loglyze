@@ -1,5 +1,7 @@
 # LogLyze
 
+**DISCLAIMER:** This tool is new and under active development and should not be used in production. If you would like to contribute then please reach out!
+
 A powerful command-line tool for analyzing log files with support for multiple log formats, flexible parsing, and interactive exploration.
 
 ## Features
